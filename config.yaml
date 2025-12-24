@@ -1,0 +1,23 @@
+project:
+  name: market-data-pipeline-databricks
+  timezone: UTC
+
+data:
+  symbols:
+    - SPY
+    - GLD
+    - EURUSD
+    - USO
+  start_date: "2025-24-12"
+  end_date: null   # null = up to latest available
+  source: "stooq"  # or "yfinance"
+
+paths:
+  raw_input_dir: "/FileStore/market_data/raw/prices"
+  checkpoints_dir: "/FileStore/market_data/checkpoints"
+
+tables:
+  bronze_prices: "bronze_prices"
+  silver_prices_daily: "silver_prices_daily"
+  gold_market_features_daily: "gold_market_features_daily"
+  data_quality_checks: "data_quality_checks"
