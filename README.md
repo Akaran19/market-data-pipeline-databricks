@@ -30,7 +30,7 @@ All outputs are designed to be consumed primarily through **SQL**.
 
 ## Data Sources
 - Primary: daily OHLCV market data (CSV-based ingestion)
-- Initial symbols (cross-asset): SPY, GLD, Oil proxy, EURUSD, BTC-USD
+- Initial symbols (cross-asset): SPY, GLD, Oil proxy, EURUSD.
 - Source options: Stooq and/or Yahoo Finance (via CSV export)
 
 ## How to Run (Databricks Community Edition)
