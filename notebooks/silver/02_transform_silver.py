@@ -2,13 +2,13 @@
 # ============================================================
 # Notebook: 02_transform_silver
 # Layer: Silver
-# Purpose: Clean, validate, and standardize Bronze market data
+# Purpose: Clean, validate, and standardize Bronze market data (SQL-first)
 # Inputs: bronze_prices
 # Outputs: silver_prices_daily, silver_prices_rejected
 # Guarantees:
-#   - Unique (symbol, date)
-#   - Valid OHLC values
-#   - Positive prices
+#   - Unique (symbol, date) (latest ingested row kept)
+#   - Positive prices (open/high/low/close > 0)
+#   - Valid OHLC consistency (high/low bounds)
 #   - Volume nullable (FX), but non-negative if present
 # ============================================================
 
@@ -19,29 +19,35 @@ SILVER_TABLE = "silver_prices_daily"
 REJECT_TABLE = "silver_prices_rejected"
 
 # COMMAND ----------
-# Load Bronze
-df = spark.table("bronze_prices")
+# 1) SQL-FIRST: typing + dedup (latest ingested_at wins) into a temp view
+spark.sql("""
+CREATE OR REPLACE TEMP VIEW v_silver_base AS
+SELECT
+  symbol,
+  CAST(date AS DATE)          AS date,
+  CAST(open AS DOUBLE)        AS open,
+  CAST(high AS DOUBLE)        AS high,
+  CAST(low AS DOUBLE)         AS low,
+  CAST(close AS DOUBLE)       AS close,
+  CAST(volume AS BIGINT)      AS volume,
+  source,
+  ingested_at,
+  input_file
+FROM (
+  SELECT
+    *,
+    ROW_NUMBER() OVER (PARTITION BY symbol, date ORDER BY ingested_at DESC) AS rn
+  FROM bronze_prices
+) t
+WHERE rn = 1
+""")
 
 # COMMAND ----------
-# Base standardization + latest-record selection if duplicates exist
-# (Even though Bronze is deduped, this is defensive and looks professional.)
-w = (
-    F.window("ingested_at", "100 years")  # placeholder; not used
-)
-
-# Create a deterministic "latest" row per (symbol, date) using ingested_at
-from pyspark.sql.window import Window
-win = Window.partitionBy("symbol", "date").orderBy(F.col("ingested_at").desc())
-
-df_std = (
-    df
-    .withColumn("rn", F.row_number().over(win))
-    .filter(F.col("rn") == 1)
-    .drop("rn")
-)
+# Load the SQL view for validation + rejects
+df_std = spark.table("v_silver_base")
 
 # COMMAND ----------
-# Define validity conditions
+# 2) Define validity conditions (PySpark for clear rule logic + rejected rows)
 cond_key = F.col("symbol").isNotNull() & F.col("date").isNotNull()
 
 cond_prices_present = (
@@ -60,7 +66,7 @@ cond_prices_positive = (
 
 cond_ohlc_consistent = (
     (F.col("high") >= F.greatest(F.col("open"), F.col("close"), F.col("low"))) &
-    (F.col("low") <= F.least(F.col("open"), F.col("close"), F.col("high")))
+    (F.col("low")  <= F.least(F.col("open"), F.col("close"), F.col("high")))
 )
 
 cond_volume_ok = (
@@ -70,13 +76,15 @@ cond_volume_ok = (
 is_valid = cond_key & cond_prices_present & cond_prices_positive & cond_ohlc_consistent & cond_volume_ok
 
 # COMMAND ----------
-# Build reject reasons (for debugging + credibility)
-reject_reason = F.when(~cond_key, F.lit("missing_key")) \
-    .when(~cond_prices_present, F.lit("missing_prices")) \
-    .when(~cond_prices_positive, F.lit("non_positive_price")) \
-    .when(~cond_ohlc_consistent, F.lit("ohlc_inconsistent")) \
-    .when(~cond_volume_ok, F.lit("invalid_volume")) \
-    .otherwise(F.lit(None))
+# 3) Build reject reasons (debuggable pipelines)
+reject_reason = (
+    F.when(~cond_key, F.lit("missing_key"))
+     .when(~cond_prices_present, F.lit("missing_prices"))
+     .when(~cond_prices_positive, F.lit("non_positive_price"))
+     .when(~cond_ohlc_consistent, F.lit("ohlc_inconsistent"))
+     .when(~cond_volume_ok, F.lit("invalid_volume"))
+     .otherwise(F.lit(None))
+)
 
 df_rejects = (
     df_std
@@ -87,7 +95,7 @@ df_rejects = (
 df_valid = df_std.filter(is_valid)
 
 # COMMAND ----------
-# Create Silver tables if not exist
+# 4) Create Silver tables if not exist (Delta, partitioned by symbol)
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {SILVER_TABLE} (
   symbol STRING,
@@ -124,17 +132,52 @@ PARTITIONED BY (symbol)
 """)
 
 # COMMAND ----------
-# Write Silver outputs (overwrite each run is fine for Silver in this project)
-# In production you might MERGE, but overwrite keeps it simple and deterministic.
+# 5) Write outputs (deterministic overwrite each run)
 df_valid.write.mode("overwrite").format("delta").saveAsTable(SILVER_TABLE)
 df_rejects.write.mode("overwrite").format("delta").saveAsTable(REJECT_TABLE)
 
 # COMMAND ----------
-# Validation / reporting
+# 6) Validation / reporting (SQL checks expected by DE/SQL-heavy teams)
 print("[silver_prices_daily] rows:", spark.table(SILVER_TABLE).count())
 print("[silver_prices_rejected] rows:", spark.table(REJECT_TABLE).count())
 
-spark.sql(f"SELECT symbol, COUNT(*) n FROM {SILVER_TABLE} GROUP BY symbol ORDER BY symbol").show()
-spark.sql(f"SELECT reject_reason, COUNT(*) n FROM {REJECT_TABLE} GROUP BY reject_reason ORDER BY n DESC").show()
+spark.sql(f"""
+SELECT symbol, COUNT(*) AS n
+FROM {SILVER_TABLE}
+GROUP BY symbol
+ORDER BY symbol
+""").show()
 
-display(spark.table(SILVER_TABLE).orderBy(F.col('date').desc()).limit(20))
+spark.sql(f"""
+SELECT reject_reason, COUNT(*) AS n
+FROM {REJECT_TABLE}
+GROUP BY reject_reason
+ORDER BY n DESC
+""").show()
+
+# No duplicates (symbol, date)
+spark.sql(f"""
+SELECT symbol, date, COUNT(*) AS n
+FROM {SILVER_TABLE}
+GROUP BY symbol, date
+HAVING n > 1
+""").show()
+
+# No negative/zero prices
+spark.sql(f"""
+SELECT *
+FROM {SILVER_TABLE}
+WHERE open <= 0 OR high <= 0 OR low <= 0 OR close <= 0
+LIMIT 50
+""").show()
+
+# Optional: OHLC sanity (should return 0)
+spark.sql(f"""
+SELECT *
+FROM {SILVER_TABLE}
+WHERE high < GREATEST(open, close, low)
+   OR low  > LEAST(open, close, high)
+LIMIT 50
+""").show()
+
+display(spark.table(SILVER_TABLE).orderBy(F.col("date").desc()).limit(20))

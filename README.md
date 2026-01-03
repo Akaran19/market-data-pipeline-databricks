@@ -1,56 +1,127 @@
-# Market Data Pipeline (Databricks + SQL)
+# Market Data Pipeline (Databricks · SQL · Delta Lake)
 
 ## Problem
-Quant and trading analysts need **reliable, analytics-ready market datasets** for pre-trade analysis.
-Raw market data is often inconsistent (schema drift, missing days, duplicates), so we need a pipeline
-that transforms raw inputs into **clean, queryable tables** with quality checks.
+Quant and trading teams rely on **clean, reliable market data** for pre-trade analysis.
+In practice, raw market data is noisy:
+- inconsistent schemas
+- missing trading days
+- duplicates
+- silent data gaps
 
-## Outputs
-This project delivers a Databricks/Lakehouse-style pipeline with Delta tables:
+Without a structured pipeline, analysts spend time validating data instead of making decisions.
 
-### Bronze (Raw)
-- `bronze_prices` — raw ingested market data + metadata (source, ingested_at)
+---
 
-### Silver (Cleaned / Normalized)
-- `silver_prices_daily` — normalized schema, deduplicated, typed columns
+## Solution
+This project implements a **Databricks-native, SQL-first data pipeline** that transforms raw market data into **analytics-ready Delta tables** with built-in data quality checks.
 
-### Gold (Analytics-ready)
-- `gold_market_features_daily` — returns/volatility/liquidity-friendly metrics for analysis
+The pipeline follows a standard **Bronze → Silver → Gold** architecture and is orchestrated using a Databricks Job.
 
-### Data Quality
-- `data_quality_checks` — missing days, duplicates, invalid values, stale ingestion flags
+Python is used only for orchestration and validation logic.  
+All delivered datasets are consumed via **SQL**.
 
-All outputs are designed to be consumed primarily through **SQL**.
+---
 
-## Architecture (Bronze / Silver / Gold)
-- Bronze: ingest raw CSV data into Delta tables with minimal assumptions
-- Silver: clean and standardize types, enforce uniqueness, normalize symbols/dates
-- Gold: produce analytics-ready aggregates/features useful for pre-trade workflows
-- Quality: write validation checks to a dedicated table on each run
+## Delivered Data Products
 
-## Data Sources
-- Primary: daily OHLCV market data (CSV-based ingestion)
-- Initial symbols (cross-asset): SPY, GLD, Oil proxy, EURUSD.
-- Source options: Stooq and/or Yahoo Finance (via CSV export)
+### Bronze — Raw Ingestion
+**Table:** `bronze_prices`
 
-## How to Run (Databricks Community Edition)
+- Raw OHLC(V) market data
+- File-level provenance (`source`, `ingested_at`, `input_file`)
+- Idempotent ingestion via MERGE
+
+**Purpose:** system of record, debugging, backfills
+
+---
+
+### Silver — Cleaned & Normalized
+**Table:** `silver_prices_daily`
+
+Guarantees:
+- one row per `(symbol, date)`
+- typed numeric columns
+- deduplicated records
+- validated OHLC consistency
+- nullable volume for FX instruments
+
+**Purpose:** trusted daily price base for analytics
+
+---
+
+### Gold — Analytics-Ready Features
+**Table:** `gold_market_features_daily`
+
+Features:
+- daily returns
+- rolling 20-day volatility
+- rolling 20-day average volume (liquidity proxy)
+
+**Purpose:** pre-trade monitoring, risk scans, feature inputs
+
+---
+
+### Data Quality & Monitoring
+**Table:** `data_quality_checks`
+
+Checks recorded on every run:
+- missing trading day gaps
+- sudden price jumps
+- stale data detection
+- pipeline row counts
+
+![Data Quality Checks](img/data_quality_check.png)
+
+**Purpose:** operational reliability and auditability
+
+---
+
+## How This Supports Pre-Trade Analysis
+The Gold table enables analysts to:
+- scan current volatility regimes
+- detect unusual price moves
+- filter assets by liquidity
+- query consistent, validated time series without Python
+
+All outputs are SQL-queryable and suitable for downstream analytics or modeling.
+
+![Analyst Query](img/analyst_query.png)
+
+---
+
+## Architecture
+
+![Pipeline Workflow](img/workflow.png)
+
+
+---
+
+## Orchestration
+The pipeline is orchestrated using a **Databricks Job** with a linear dependency:
+
+01_ingest_bronze
+→ 02_transform_silver
+→ 03_aggregate_gold
+→ 04_data_quality_checks
+
+
+The job can be scheduled to run daily to refresh analytics-ready tables.
+
+---
+
+## How to Run
 1. Create a Databricks Community Edition workspace
 2. Import notebooks from `/notebooks`
-3. Run in order:
-   1) `01_ingest_bronze`
-   2) `02_transform_silver`
-   3) `03_aggregate_gold`
-   4) `04_data_quality_checks`
+3. Either:
+   - run notebooks manually in order, or
+   - run the Databricks Job `market-data-pipeline`
 4. Query outputs via SQL (see `/sql/example_queries.sql`)
 
-## Repo Structure
-- `/notebooks/bronze` — ingestion logic
-- `/notebooks/silver` — cleaning/normalization logic
-- `/notebooks/gold` — analytics-ready outputs
-- `/sql` — example stakeholder queries + validation checks
-- `/docs` — design notes, assumptions, limitations
+![Show Tables](img/show_tables.png)
 
-## Non-goals
-- No ML models
-- No dashboard/UI
-- Focus is on SQL-first data products, reliability, and quality checks
+---
+
+## Non-Goals
+- No machine learning models
+- No dashboards or UI
+- Focus on **SQL-first data products**, correctness, and reliability
